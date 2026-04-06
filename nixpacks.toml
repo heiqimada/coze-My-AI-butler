@@ -1,8 +1,0 @@
-providers = ["python"]
-
-[python]
-version = "3.12"
-packageManager = "pip"
-
-[pip]
-requirementsPath = "requirements.txt"
