@@ -1,6 +1,6 @@
 """
 AI 状态管家 API 服务
-独立部署版本，支持 Coze + Supabase 本地化
+支持 Coze + Supabase + 对话记录
 """
 import os
 import logging
@@ -9,6 +9,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import requests
 from supabase import create_client, Client
@@ -23,7 +24,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="AI状态管家 API", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="AI状态管家 API", version="1.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +40,6 @@ COZE_API_BASE = os.getenv("COZE_API_BASE", "https://api.coze.cn")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("COZE_SUPABASE_URL") or ""
 SUPABASE_ANON = os.getenv("SUPABASE_ANON") or os.getenv("SUPABASE_KEY") or os.getenv("COZE_SUPABASE_ANON_KEY") or ""
-SUPABASE_SERVICE = os.getenv("SUPABASE_SERVICE") or os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("COZE_SUPABASE_SERVICE_ROLE_KEY") or ""
 
 supabase_client: Optional[Client] = None
 
@@ -65,7 +65,7 @@ def get_supabase() -> Client:
 
 class ChatRequest(BaseModel):
     message: str
-    user_id: str = "web_user"
+    user_id: str = "user"
 
 
 class GoalCreate(BaseModel):
@@ -81,7 +81,7 @@ class StatusRecordCreate(BaseModel):
     note: Optional[str] = None
 
 
-def coze_chat(message: str, user_id: str = "web_user") -> str:
+def coze_chat(message: str, user_id: str = "user") -> str:
     if not COZE_API_KEY:
         raise HTTPException(status_code=500, detail="COZE_TOKEN not configured")
 
@@ -133,6 +133,7 @@ def coze_chat(message: str, user_id: str = "web_user") -> str:
                 if messages_result.get("code") == 0:
                     for msg in messages_result["data"]:
                         if msg["role"] == "assistant" and msg["type"] == "answer":
+                            save_chat_record(user_id, message, msg["content"])
                             return msg["content"]
                 return "Response empty"
 
@@ -151,24 +152,128 @@ def coze_chat(message: str, user_id: str = "web_user") -> str:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/")
+def save_chat_record(user_id: str, user_message: str, bot_response: str):
+    if not supabase_client:
+        return
+    try:
+        supabase_client.table("chat_records").insert({
+            "user_id": user_id,
+            "user_message": user_message,
+            "bot_response": bot_response,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+    except Exception as e:
+        logger.error(f"Save chat record error: {e}")
+
+
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    return {
-        "name": "AI状态管家 API",
-        "version": "1.1.0",
-        "status": "running",
-        "supabase_configured": bool(supabase_client)
-    }
+    return """
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>AI 状态管家</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #F9FAFB; height: 100vh; display: flex; flex-direction: column; }
+            .header { background: #FFF; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center; }
+            .header h1 { font-size: 18px; color: #1F2937; }
+            .chat { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+            .msg { max-width: 85%; padding: 12px 16px; border-radius: 16px; line-height: 1.5; }
+            .msg.user { background: #4F46E5; color: #FFF; align-self: flex-end; border-bottom-right-radius: 4px; }
+            .msg.bot { background: #FFF; color: #1F2937; align-self: flex-start; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+            .welcome { text-align: center; padding: 60px 20px; }
+            .welcome h2 { font-size: 24px; margin: 16px 0 8px; }
+            .welcome p { color: #6B7280; }
+            .input-area { background: #FFF; padding: 12px 16px; box-shadow: 0 -1px 3px rgba(0,0,0,0.1); }
+            .input-row { display: flex; gap: 12px; }
+            #msg { flex: 1; padding: 12px 16px; border-radius: 24px; border: 1px solid #E5E7EB; font-size: 16px; outline: none; }
+            #msg:focus { border-color: #4F46E5; }
+            .send-btn { padding: 12px 24px; background: #4F46E5; color: #FFF; border: none; border-radius: 24px; font-size: 16px; cursor: pointer; }
+            .send-btn:disabled { background: #D1D5DB; cursor: not-allowed; }
+            .quick { display: flex; gap: 8px; padding: 12px 16px; overflow-x: auto; }
+            .quick button { flex-shrink: 0; padding: 8px 16px; border: 1px solid #E5E7EB; border-radius: 16px; background: #FFF; cursor: pointer; }
+        </style>
+    </head>
+    <body>
+        <div class="header"><h1>🤖 AI 状态管家</h1></div>
+        <div class="chat" id="chat">
+            <div class="welcome">
+                <div style="font-size:64px">🤖</div>
+                <h2>你好，我是你的 AI 状态管家</h2>
+                <p>记录状态、设定目标，我来帮你分析和建议</p>
+            </div>
+        </div>
+        <div class="quick">
+            <button onclick="quickSend('今天感觉有点累')">😔 心情不好</button>
+            <button onclick="quickSend('记录一下今天的睡眠')">😴 记录睡眠</button>
+            <button onclick="quickSend('我想设定一个目标')">🎯 设定目标</button>
+            <button onclick="quickSend('今天状态不错')">😊 状态不错</button>
+        </div>
+        <div class="input-area">
+            <div class="input-row">
+                <input type="text" id="msg" placeholder="输入消息..." onkeypress="if(event.key==='Enter')send()">
+                <button class="send-btn" id="sendBtn" onclick="send()">发送</button>
+            </div>
+        </div>
+        <script>
+            let loading = false;
+            async function send() {
+                const input = document.getElementById('msg');
+                const msg = input.value.trim();
+                if (!msg || loading) return;
+                addMsg(msg, 'user');
+                input.value = '';
+                const loadingId = addLoading();
+                loading = true;
+                document.getElementById('sendBtn').disabled = true;
+                try {
+                    const res = await fetch('/chat', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: msg, user_id: 'web'})});
+                    const data = await res.json();
+                    remove(loadingId);
+                    if (data.success) addMsg(data.reply, 'bot');
+                    else addMsg('抱歉发生了错误', 'bot');
+                } catch (e) {
+                    remove(loadingId);
+                    addMsg('网络连接失败', 'bot');
+                }
+                loading = false;
+                document.getElementById('sendBtn').disabled = false;
+            }
+            function quickSend(msg) { document.getElementById('msg').value = msg; send(); }
+            function addMsg(content, type) {
+                const chat = document.getElementById('chat');
+                const w = chat.querySelector('.welcome');
+                if (w) w.remove();
+                const div = document.createElement('div');
+                div.className = 'msg ' + type;
+                div.innerHTML = content.replace(/\n/g, '<br>');
+                chat.appendChild(div);
+                chat.scrollTop = chat.scrollHeight;
+            }
+            function addLoading() {
+                const id = 'l-' + Date.now();
+                const chat = document.getElementById('chat');
+                const div = document.createElement('div');
+                div.className = 'msg bot';
+                div.id = id;
+                div.textContent = '思考中...';
+                chat.appendChild(div);
+                chat.scrollTop = chat.scrollHeight;
+                return id;
+            }
+            function remove(id) { const el = document.getElementById(id); if (el) el.remove(); }
+        </script>
+    </body>
+    </html>
+    """
 
 
 @app.get("/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "coze_configured": bool(COZE_API_KEY),
-        "supabase_configured": bool(supabase_client)
-    }
+    return {"status": "healthy", "timestamp": datetime.now().isoformat(), "coze_configured": bool(COZE_API_KEY), "supabase_configured": bool(supabase_client)}
 
 
 @app.post("/chat")
@@ -190,7 +295,6 @@ async def get_goals(limit: int = 20, offset: int = 0):
         response = client.table("goals").select("*").order("created_at", desc=True).range(offset, offset + limit - 1).execute()
         return {"success": True, "data": response.data}
     except Exception as e:
-        logger.error(f"Get goals error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -198,17 +302,9 @@ async def get_goals(limit: int = 20, offset: int = 0):
 async def create_goal(goal: GoalCreate):
     try:
         client = get_supabase()
-        data = {
-            "title": goal.title,
-            "description": goal.description,
-            "deadline": goal.deadline,
-            "priority": goal.priority,
-            "status": "active"
-        }
-        response = client.table("goals").insert(data).execute()
+        response = client.table("goals").insert({"title": goal.title, "description": goal.description, "deadline": goal.deadline, "priority": goal.priority, "status": "active"}).execute()
         return {"success": True, "data": response.data[0]}
     except Exception as e:
-        logger.error(f"Create goal error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -222,7 +318,6 @@ async def get_status_records(limit: int = 20, offset: int = 0, status_type: Opti
         response = query.execute()
         return {"success": True, "data": response.data}
     except Exception as e:
-        logger.error(f"Get status error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -230,12 +325,21 @@ async def get_status_records(limit: int = 20, offset: int = 0, status_type: Opti
 async def create_status_record(record: StatusRecordCreate):
     try:
         client = get_supabase()
-        data = {"status_type": record.status_type, "value": record.value, "note": record.note}
-        response = client.table("status_records").insert(data).execute()
+        response = client.table("status_records").insert({"status_type": record.status_type, "value": record.value, "note": record.note}).execute()
         return {"success": True, "data": response.data[0]}
     except Exception as e:
-        logger.error(f"Create status error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat/history")
+async def get_chat_history(limit: int = 50):
+    try:
+        if not supabase_client:
+            return {"success": False, "error": "Supabase not configured"}
+        response = supabase_client.table("chat_records").select("*").order("created_at", desc=True).limit(limit).execute()
+        return {"success": True, "data": response.data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 if __name__ == "__main__":
