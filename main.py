@@ -38,7 +38,7 @@ app.add_middleware(
 )
 
 # ============== 配置 ==============
-COZE_API_KEY = os.getenv("COZE_API_KEY", "")
+COZE_API_KEY = os.getenv("COZE_TOKEN") or os.getenv("COZE_API_KEY") or ""
 COZE_BOT_ID = os.getenv("COZE_BOT_ID", "7624565645052756018")
 COZE_API_BASE = os.getenv("COZE_API_BASE", "https://api.coze.cn")
 
